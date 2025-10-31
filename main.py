@@ -111,6 +111,7 @@ class ImageResponse(BaseModel):
 
 # --- Helper Function ---
 async def generate_single_image(image_bytes, mime_type, master_prompt, index):
+    """Generates a single image, respecting the concurrency limit set by the semaphore."""
     async with SEMAPHORE:
         try:
             contents = [
@@ -118,24 +119,40 @@ async def generate_single_image(image_bytes, mime_type, master_prompt, index):
                 types.Part.from_text(text=master_prompt)
             ]
             config = types.GenerateContentConfig(response_modalities=["IMAGE"])
-            stream = client.models.generate_content_stream("gemini-2.5-flash-image-preview", contents=contents, config=config)
+            
+            # ✅ FIXED: Changed the function call back to using the 'model=' keyword argument,
+            # which is the correct syntax for the SDK. This resolves the TypeError.
+            stream = client.models.generate_content_stream(
+                model="gemini-2.5-flash-image-preview",
+                contents=contents,
+                config=config
+            )
+            
             for chunk in stream:
                 if not chunk.candidates or not chunk.candidates[0].content or not chunk.candidates[0].content.parts:
                     continue
                 for part in chunk.candidates[0].content.parts:
                     if part.inline_data and part.inline_data.data:
+                        # Return just the base64 string for saving and sending to the user
                         return base64.b64encode(part.inline_data.data).decode("utf-8")
         except Exception as e:
             print(f"Error generating image {index}:", e)
             return None
 
 
-# --- Authentication Helper Functions ---
-def verify_password(plain_password, hashed_password):
-    return pwd_context.verify(plain_password, hashed_password)
 
-def get_password_hash(password):
-    return pwd_context.hash(password)
+# --- Authentication Helper Functions ---
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    """Verifies a password, respecting the 72-byte limit of bcrypt."""
+    password_bytes = plain_password.encode('utf-8')
+    # Truncate the user's input password to 72 bytes before verification
+    return pwd_context.verify(password_bytes[:72], hashed_password)
+
+def get_password_hash(password: str) -> str:
+    print("Password type:", type(password), "Length:", len(password))
+    password_bytes = password.encode('utf-8') if isinstance(password, str) else password
+    return pwd_context.hash(password_bytes[:72])
+
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     to_encode = data.copy()
@@ -205,29 +222,42 @@ async def generate_mockups(
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session)
 ):
-    image_bytes = await image.read()
-    mime_type = mimetypes.guess_type(image.filename)[0]
-    master_prompt = f"""
+    try:
+        image_bytes = await image.read()
+        mime_type = mimetypes.guess_type(image.filename)[0]
+        
+        master_prompt = f"""
             You are a professional mockup designer.
             Generate a realistic, high-quality mockup of the below item that naturally and attractively integrates the provided logo or design.
             Further user specifications: {prompt}
             Make sure the output looks professional, photo-realistic, and studio-quality.
         """
-    
-    tasks = [generate_single_image(image_bytes, mime_type, master_prompt, i) for i in range(6)]
-    results = await asyncio.gather(*tasks)
+        
+        tasks = [generate_single_image(image_bytes, mime_type, master_prompt, i) for i in range(6)]
+        results = await asyncio.gather(*tasks)
 
-    images_b64 = [r for r in results if r]
-    
-    # Save successful generations to the database
-    for b64_img in images_b64:
-        db_mockup = MockupImage(prompt=prompt, base64_image=b64_img, user_id=current_user.id)
-        session.add(db_mockup)
-    session.commit()
+        images_b64 = [r for r in results if r]
+        
+        # Save successful generations to the database for the logged-in user
+        if images_b64:
+            print(f"Successfully generated {len(images_b64)} images. Saving to database...")
+            for b64_img in images_b64:
+                db_mockup = MockupImage(prompt=prompt, base64_image=b64_img, user_id=current_user.id)
+                session.add(db_mockup)
+            session.commit()
+            print("Save complete.")
+        else:
+            print("Generation failed to produce images.")
 
-    if not images_b64:
-        raise HTTPException(status_code=500, detail="No image data returned from Gemini API")
-    return {"images": images_b64, "count": len(images_b64)}
+
+        if not images_b64:
+            raise HTTPException(status_code=500, detail="No image data returned from Gemini API")
+            
+        return {"images": images_b64, "count": len(images_b64)}
+
+    except Exception as e:
+        print(f"Error in generate_mockups endpoint: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/my-mockups", response_model=List[MockupImagePublic])
 async def get_my_mockups(current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
