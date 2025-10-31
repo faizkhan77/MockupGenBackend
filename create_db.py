@@ -3,6 +3,7 @@ from dotenv import load_dotenv
 from sqlmodel import SQLModel, create_engine, Field, Relationship
 from typing import List, Optional
 import sqlalchemy
+from sqlalchemy.dialects.mysql import LONGTEXT
 
 # --- Pydantic Models for Database Tables ---
 
@@ -20,7 +21,7 @@ class MockupImage(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     prompt: str
     # Use LONGTEXT for storing base64 strings which can be very long
-    base64_image: str = Field(sa_column=sqlalchemy.Column(sqlalchemy.LONGTEXT)) 
+    base64_image: str = Field(sa_column=sqlalchemy.Column(LONGTEXT))
     
     # This creates the many-to-one relationship
     user_id: Optional[int] = Field(default=None, foreign_key="user.id")
